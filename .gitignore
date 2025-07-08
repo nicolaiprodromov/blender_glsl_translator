@@ -10,7 +10,7 @@ __pycache__/
 *.pyo
 *.pyd
 
-# VS Code settings (optional - remove this line if you want to include VS Code settings)
+# VS Code settings
 .vscode/
 
 # Temporary files
@@ -18,5 +18,6 @@ __pycache__/
 *.temp
 
 # Tools
+*.sh
 *.ps1
 *.html
