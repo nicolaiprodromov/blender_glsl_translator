@@ -1,7 +1,3 @@
-#iChannel0 "file://gradient.frag"
-#iChannel1 "file://tangent.frag"
-#iChannel2 "file://shapes.frag"
-
 #include "utils/math.glsl"
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
@@ -11,7 +7,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float scale      = 1.0;
     float distortion = 0.4;
     float roughness  = 0.86;
-    int   detail     = 5;
+    int   detail     = 15;
 
     vec3 position = vec3(uv, 0.0);
     float noise = perlinNoise(position, w, scale, distortion, roughness, detail);

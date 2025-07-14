@@ -1,3 +1,25 @@
+vec2 linearLight(vec2 base, vec2 blend, float factor) {
+    vec2 linearBurn = max(base + 2.0 * blend - 1.0, vec2(0.0));
+    vec2 linearDodge = min(base + 2.0 * (blend - 0.5), vec2(1.0));
+    vec2 result = mix(linearBurn, linearDodge, step(0.5, blend));
+    return mix(base, result, factor);
+}
+
+float random(float seed) {
+    return fract(sin(seed) * 43758.5453);
+}
+
+// make a function to return random float between a and b
+float randomRange(float a, float b, float seed) {
+    return a + (b - a) * random(seed);
+}   
+
+mat2 rotate2D(float angle) {
+    float c = cos(angle);
+    float s = sin(angle);
+    return mat2(c, -s, s, c);
+}
+
 vec2 rotateVector(vec2 v, vec3 rotation) {
     float cx = cos(rotation.x), sx = sin(rotation.x);
     float cy = cos(rotation.y), sy = sin(rotation.y);
