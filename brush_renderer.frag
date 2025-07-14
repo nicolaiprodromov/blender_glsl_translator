@@ -1,7 +1,31 @@
 #iChannel0 "brush.frag"
 #iChannel1 "tangent.frag"
-#iChannel2 "file://assets/face2.jpg"
+#iChannel2 "sequence.frag"
 #include "sdf/sdf_shapes.glsl"
+
+// PCG-inspired hash function - much better distribution
+float hash(float n) {
+    // Multiple rounds of mixing for better randomness
+    n = fract(n * 0.1031);
+    n *= n + 33.33;
+    n *= n + n;
+    return fract(n);
+}
+
+// Improved 2D hash with better mixing
+vec2 hash2D(float n) {
+    // Generate two independent values with good distribution
+    float n2 = n * 127.1;
+    return fract(vec2(
+        sin(n) * 43758.5453123,
+        sin(n2) * 22578.1459123
+    ));
+}
+
+// Additional mixing function to break up patterns
+float mixHash(float a, float b) {
+    return hash(a * 73.1 + b * 179.3);
+}
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;
@@ -9,96 +33,95 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // Start with transparent black
     fragColor = vec4(0.0);
     
-    // Number of strokes per frame (change this to adjust)
-    const int STROKES_PER_FRAME = 200;
+    const int STROKES_PER_FRAME = 50;
+    
+    // Pre-compute inverse resolution for faster math
+    vec2 invRes = 1.0 / iResolution.xy;
     
     // Loop through all strokes for this frame
     for(int strokeIndex = 0; strokeIndex < STROKES_PER_FRAME; strokeIndex++) {
-        // Use stroke index to create unique random seeds
-        float strokeSeed = float(iFrame * STROKES_PER_FRAME + strokeIndex);
+        // Ultra early out - skip if we're already mostly opaque
+        if(fragColor.a > 0.95) break;
         
-        // Define plane dimensions in pixels
-        float planeWidth = randomRange(10.0, 50.0, iTime*60.0 + float(strokeIndex));
-        float planeHeight = randomRange(10.0, 40.0, iTime*60.0+1.0 + float(strokeIndex));
+        // IMPROVED: Better seed generation with multiple mixing steps
+        float frameSeed = float(iFrame);
+        float strokeFloat = float(strokeIndex);
         
-        // Generate random position for the new plane (in UV space)
-        vec2 randomPos = vec2(random(strokeSeed), random(strokeSeed + 1.0));
+        // Mix frame and stroke index with prime multipliers to avoid patterns
+        float seed1 = mixHash(frameSeed * 0.7919, strokeFloat * 1.3733);
+        float seed2 = mixHash(frameSeed * 2.2817, strokeFloat * 0.8923);
         
-        // Convert random position to pixel coordinates
-        vec2 planePos = randomPos * iResolution.xy;
+        // Generate position using improved 2D hash
+        vec2 randPos = hash2D(seed1 * 999.7 + seed2 * 444.3);
         
-        // Sample the flow field at the plane's center position
-        vec2 flowVector = texture(iChannel1, randomPos).xy;
+        // Additional scrambling to ensure no patterns
+        randPos.x = hash(randPos.x * 17.3 + randPos.y * 31.7);
+        randPos.y = hash(randPos.y * 13.5 + seed1 * 7.7);
         
-        // Calculate rotation angle from the flow vector
-        float rotationAngle = atan(flowVector.y, flowVector.x);
+        // Convert to pixel coordinates
+        vec2 planePos = randPos * iResolution.xy;
         
-        // Create rotation matrix
-        mat2 rotMat = rotate2D(rotationAngle);
+        // Quick Manhattan distance check - extremely fast
+        vec2 diff = abs(fragCoord - planePos);
+        if(diff.x > 35.0 || diff.y > 35.0) continue;
         
-        // Check if current pixel might be inside the rotated plane
-        float maxDim = max(planeWidth, planeHeight) * 0.7071; // sqrt(2)/2
-        vec2 expandedMin = planePos - vec2(maxDim);
-        vec2 expandedMax = planePos + vec2(maxDim);
+        // Define plane dimensions with better randomness
+        float sizeHash1 = hash(seed1 * 4.567 + seed2 * 8.901);
+        float sizeHash2 = hash(seed2 * 5.678 + seed1 * 9.012);
         
-        if (fragCoord.x >= expandedMin.x && fragCoord.x <= expandedMax.x &&
-            fragCoord.y >= expandedMin.y && fragCoord.y <= expandedMax.y) {
-            
-            // Transform pixel coordinates to plane-local coordinates
-            vec2 relativePos = fragCoord - planePos;
-            
-            // Apply inverse rotation to check if point is inside the plane
-            vec2 localPos = rotMat * relativePos;
-            
-            // Check if the rotated point is inside the original plane bounds
-            if (abs(localPos.x) <= planeWidth * 0.5 && abs(localPos.y) <= planeHeight * 0.5) {
-                // Calculate local UV coordinates within the plane (0-1 range)
-                vec2 localUV = (localPos + vec2(planeWidth, planeHeight) * 0.5) / vec2(planeWidth, planeHeight);
-
-                vec4 input_brush = texture(iChannel0, rotateVector(localUV, vec3(0.0, 0.0, toRadians(90.0))));
-
-                // Only process if this stroke has opacity and we haven't already drawn here
-                if(input_brush.a > 0.0 && fragColor.a < 1.0) {
-                    // Calculate average color of the image within the brush bounds
-                    vec3 avgColor = vec3(0.0);
-                    float sampleCount = 0.0;
-                    
-                    // Sample grid for averaging (adjust for quality vs performance)
-                    const int samples = 8;
-                    for(int i = 0; i < samples; i++) {
-                        for(int j = 0; j < samples; j++) {
-                            vec2 sampleUV = vec2(float(i), float(j)) / float(samples - 1);
-                            
-                            // Transform sample point to world space
-                            vec2 sampleLocal = sampleUV * vec2(planeWidth, planeHeight) - vec2(planeWidth, planeHeight) * 0.5;
-                            vec2 sampleWorld = planePos + rotMat * sampleLocal;
-                            vec2 sampleWorldUV = sampleWorld / iResolution.xy;
-                            
-                            // Sample the brush at this position to check if we should include this sample
-                            vec4 brushSample = texture(iChannel0, rotateVector(sampleUV, vec3(0.0, 0.0, toRadians(90.0))));
-                            
-                            if(brushSample.a > 0.1) { // Only sample where brush has opacity
-                                avgColor += texture(iChannel2, sampleWorldUV).rgb * brushSample.a;
-                                sampleCount += brushSample.a;
-                            }
-                        }
-                    }
-                    
-                    if(sampleCount > 0.0) {
-                        avgColor /= sampleCount;
-                    }
-                    
-                    float mix_trs = 0.02; // Adjust this threshold to control blending
-                    avgColor = vec3(avgColor.r + randomRange(-mix_trs, mix_trs, iTime + float(strokeIndex)*0.1),
-                                    avgColor.g + randomRange(-mix_trs, mix_trs, iTime + 1.0 + float(strokeIndex)*0.1),
-                                    avgColor.b + randomRange(-mix_trs, mix_trs, iTime + 2.0 + float(strokeIndex)*0.1)
-                                    );
-                    
-                    // Blend the new stroke with existing color using alpha blending
-                    vec4 newStroke = vec4(avgColor, input_brush.a);
-                    fragColor = mix(fragColor, newStroke, newStroke.a);
-                }
-            }
-        }
+        float planeWidth = 10.0 + 20.0 * sizeHash1;
+        float planeHeight = 5.0 + 20.0 * sizeHash2;
+        
+        // More precise distance check
+        float maxDim = max(planeWidth, planeHeight) * 0.71;
+        if(diff.x > maxDim || diff.y > maxDim) continue;
+        
+        // Sample the flow field
+        vec2 flowVector = texture(iChannel1, randPos).xy;
+        
+        // Fast rotation using pre-computed values
+        float angle = atan(flowVector.y, flowVector.x);
+        vec2 cs = vec2(cos(angle), sin(angle));
+        
+        // Transform pixel to local space
+        vec2 relativePos = fragCoord - planePos;
+        vec2 localPos = vec2(
+            cs.x * relativePos.x + cs.y * relativePos.y,
+            -cs.y * relativePos.x + cs.x * relativePos.y
+        );
+        
+        // Check bounds
+        vec2 halfSize = vec2(planeWidth, planeHeight) * 0.5;
+        if(abs(localPos.x) > halfSize.x || abs(localPos.y) > halfSize.y) continue;
+        
+        // Calculate local UV
+        vec2 localUV = (localPos + halfSize) / (halfSize * 2.0);
+        
+        // Fast 90 degree rotation for brush UV
+        vec2 brushUV = vec2(localUV.y, 1.0 - localUV.x);
+        
+        // Single texture fetch for brush
+        vec4 brush = texture(iChannel0, brushUV);
+        
+        // Skip if brush has no opacity
+        if(brush.a < 0.01) continue;
+        
+        // Sample color
+        vec3 color = texture(iChannel2, randPos).rgb;
+        
+        // Better color variation using mixed seeds
+        float colorVar1 = hash(seed1 * 23.456) * 0.04 - 0.02;
+        float colorVar2 = hash(seed2 * 34.567) * 0.04 - 0.02;
+        float colorVar3 = mixHash(seed1, seed2) * 0.04 - 0.02;
+        
+        color += vec3(colorVar1, colorVar2, colorVar3);
+        
+        // Optimized blending
+        float alpha = brush.a * (1.0 - fragColor.a);
+        fragColor.rgb = fragColor.rgb + color * alpha;
+        fragColor.a = fragColor.a + alpha;
     }
+    
+    // Clamp alpha to valid range
+    fragColor.a = min(fragColor.a, 1.0);
 }
