@@ -3,6 +3,16 @@
 #iChannel2 "sequence.frag"
 #include "sdf/sdf_shapes.glsl"
 
+// Mouse effect parameters
+const float MOUSE_EFFECT_RADIUS = 800.0;  // Radius of mouse influence in pixels
+const float MIN_BRUSH_WIDTH = 20.0;        // Minimum brush width
+const float MAX_BRUSH_WIDTH = 120.0;       // Maximum brush width  
+const float MIN_BRUSH_HEIGHT = 20.0;       // Minimum brush height
+const float MAX_BRUSH_HEIGHT = 60.0;      // Maximum brush height
+const float MIN_DENSITY = .1;            // Minimum density (0-1)
+const float MAX_DENSITY = 1.0;            // Maximum density (0-1)
+const int BASE_STROKES_PER_FRAME = 700;  // Base number of strokes
+
 // PCG-inspired hash function - much better distribution
 float hash(float n) {
     // Multiple rounds of mixing for better randomness
@@ -33,13 +43,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // Start with transparent black
     fragColor = vec4(0.0);
     
-    const int STROKES_PER_FRAME = 50;
+    // Get mouse position
+    vec2 mousePos = iMouse.xy;
     
     // Pre-compute inverse resolution for faster math
     vec2 invRes = 1.0 / iResolution.xy;
     
     // Loop through all strokes for this frame
-    for(int strokeIndex = 0; strokeIndex < STROKES_PER_FRAME; strokeIndex++) {
+    for(int strokeIndex = 0; strokeIndex < BASE_STROKES_PER_FRAME; strokeIndex++) {
         // Ultra early out - skip if we're already mostly opaque
         if(fragColor.a > 0.95) break;
         
@@ -61,16 +72,35 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         // Convert to pixel coordinates
         vec2 planePos = randPos * iResolution.xy;
         
+        // Calculate distance to mouse
+        float mouseDist = length(planePos - mousePos);
+        float mouseInfluence = 1.0 - smoothstep(0.0, MOUSE_EFFECT_RADIUS, mouseDist);
+        
+        // Calculate density based on mouse proximity
+        float density = mix(MIN_DENSITY, MAX_DENSITY, mouseInfluence);
+        
+        // Skip stroke based on density
+        if(hash(seed1 * 111.1 + seed2 * 222.2) > density) continue;
+        
         // Quick Manhattan distance check - extremely fast
         vec2 diff = abs(fragCoord - planePos);
         if(diff.x > 35.0 || diff.y > 35.0) continue;
         
-        // Define plane dimensions with better randomness
+        // Calculate size based on mouse proximity
         float sizeHash1 = hash(seed1 * 4.567 + seed2 * 8.901);
         float sizeHash2 = hash(seed2 * 5.678 + seed1 * 9.012);
         
-        float planeWidth = 10.0 + 20.0 * sizeHash1;
-        float planeHeight = 5.0 + 20.0 * sizeHash2;
+        // Interpolate between min and max sizes based on mouse distance
+        float planeWidth = mix(
+            MIN_BRUSH_WIDTH + (MAX_BRUSH_WIDTH - MIN_BRUSH_WIDTH) * sizeHash1,
+            MIN_BRUSH_WIDTH,
+            mouseInfluence
+        );
+        float planeHeight = mix(
+            MIN_BRUSH_HEIGHT + (MAX_BRUSH_HEIGHT - MIN_BRUSH_HEIGHT) * sizeHash2,
+            MIN_BRUSH_HEIGHT,
+            mouseInfluence
+        );
         
         // More precise distance check
         float maxDim = max(planeWidth, planeHeight) * 0.71;
@@ -108,13 +138,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         
         // Sample color
         vec3 color = texture(iChannel2, randPos).rgb;
-        
-        // Better color variation using mixed seeds
-        float colorVar1 = hash(seed1 * 23.456) * 0.04 - 0.02;
-        float colorVar2 = hash(seed2 * 34.567) * 0.04 - 0.02;
-        float colorVar3 = mixHash(seed1, seed2) * 0.04 - 0.02;
-        
-        color += vec3(colorVar1, colorVar2, colorVar3);
         
         // Optimized blending
         float alpha = brush.a * (1.0 - fragColor.a);

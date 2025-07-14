@@ -1,96 +1,125 @@
 #iChannel0 "sequence.frag"
 #iChannel1 "dist_vid.frag"
+#iChannel2 "tangent.frag"
 
-// Configuration variables - adjust these to experiment
-#define ENLARGEMENT_FACTOR 20.0
-#define SELECTION_PERCENTAGE 0.1
-#define HUE_SHIFT_PERCENTAGE 0.15  // Percentage of pixels to hue shift
-#define HUE_SHIFT_AMOUNT 0.3       // Amount to shift hue (0.0 to 1.0)
-
-// Random function using time for per-frame variation
-float random(vec2 st, float time) {
-    return fract(sin(dot(st.xy + time, vec2(12.9898, 78.233))) * 43758.5453123);
+uint wang_hash(uint seed) {
+    seed = (seed ^ 61u) ^ (seed >> 16u);
+    seed *= 9u;
+    seed = seed ^ (seed >> 4u);
+    seed *= 0x27d4eb2du;
+    seed = seed ^ (seed >> 15u);
+    return seed;
 }
 
-// Convert RGB to HSV
-vec3 rgb2hsv(vec3 c) {
-    vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
-    vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
-    vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+float wang_hash_float(vec2 pixelCoord, float seed) {
+    uint x = uint(pixelCoord.x);
+    uint y = uint(pixelCoord.y);
+    uint s = uint(seed);
+    uint hash = wang_hash(x + wang_hash(y + wang_hash(s)));
+    return float(hash) / float(0xffffffffu);
+}
+
+float selectRandomPixels(vec2 fragCoord, float percentage, float seed) {
+    vec2 pixelCoord = floor(fragCoord);
+    float rand = wang_hash_float(pixelCoord, seed);
+    return step(rand, percentage);
+}
+
+// Function to rotate a point around a center
+vec2 rotatePoint(vec2 point, vec2 center, float angle) {
+    vec2 translated = point - center;
+    float cosA = cos(angle);
+    float sinA = sin(angle);
+    vec2 rotated = vec2(
+        translated.x * cosA - translated.y * sinA,
+        translated.x * sinA + translated.y * cosA
+    );
+    return rotated + center;
+}
+
+// Main function that creates enlarged pixels from randomly selected points
+vec4 enlargeRandomPixels(
+    vec2 fragCoord,           // Current fragment coordinate
+    sampler2D sourceTexture,  // Texture to sample colors from
+    sampler2D tangentTexture, // Texture containing tangent vectors
+    vec2 resolution,          // Resolution of the screen
+    vec2 pixelSize,           // Size of the enlarged pixels (width, height)
+    float percentage,         // Percentage of pixels to select (0.0-1.0)
+    float seed,              // Random seed
+    vec4 backgroundColor     // Color to use for non-selected areas
+) {
+    // Start with background color
+    vec4 outColor = backgroundColor;
     
-    float d = q.x - min(q.w, q.y);
-    float e = 1.0e-10;
-    return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
-}
-
-// Convert HSV to RGB
-vec3 hsv2rgb(vec3 c) {
-    vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
-}
-
-// Function to apply random hue shift effect
-vec4 applyRandomHueShift(vec4 color, vec2 uv, float time, float hueShiftPercentage, float hueShiftAmount) {
-    // Generate random value for this pixel (changes per frame due to time)
-    float randVal = random(uv, time + 100.0); // Add offset to get different randomness than enlargement
+    // Check a larger area to account for rotation
+    float maxDim = max(pixelSize.x, pixelSize.y);
+    vec2 searchRadius = vec2(maxDim * 1.5);
     
-    // Check if this pixel should have its hue shifted
-    if (randVal < hueShiftPercentage) {
-        // Convert to HSV, shift hue, convert back to RGB
-        vec3 hsv = rgb2hsv(color.rgb);
-        hsv.x = fract(hsv.x + hueShiftAmount); // Shift hue and wrap around
-        return vec4(hsv2rgb(hsv), color.a);
-    } else {
-        // Return original color
-        return color;
+    // Search in a wider area around the current fragment
+    vec2 searchStart = fragCoord - searchRadius;
+    vec2 searchEnd = fragCoord + searchRadius;
+    
+    for(float y = searchStart.y; y <= searchEnd.y; y += 1.0) {
+        for(float x = searchStart.x; x <= searchEnd.x; x += 1.0) {
+            vec2 checkPos = vec2(x, y);
+            
+            // Make sure we're not checking outside the screen bounds
+            if(checkPos.x < 0.0 || checkPos.x >= resolution.x || 
+               checkPos.y < 0.0 || checkPos.y >= resolution.y) {
+                continue;
+            }
+            
+            // Check if this position was randomly selected
+            float selected = selectRandomPixels(checkPos, percentage, seed);
+            
+            if(selected > 0.5) {
+                // Get the tangent vector at this position
+                vec2 tangentUV = checkPos / resolution;
+                vec2 tangent = texture(tangentTexture, tangentUV).xy;
+                
+                // Normalize the tangent if it's not zero
+                if(length(tangent) > 0.001) {
+                    tangent = normalize(tangent);
+                } else {
+                    tangent = vec2(0.0, 1.0); // Default to vertical if no tangent
+                }
+                
+                // Calculate the angle to rotate (align height with tangent direction)
+                float angle = atan(tangent.x, tangent.y);
+                
+                // Check if the current fragment is within the rotated rectangle
+                vec2 localPos = fragCoord - checkPos;
+                vec2 rotatedPos = rotatePoint(fragCoord, checkPos, -angle);
+                vec2 rectMin = checkPos - pixelSize * 0.5;
+                vec2 rectMax = checkPos + pixelSize * 0.5;
+                
+                // Check if rotated position is within the rectangle bounds
+                if(rotatedPos.x >= rectMin.x && rotatedPos.x <= rectMax.x &&
+                   rotatedPos.y >= rectMin.y && rotatedPos.y <= rectMax.y) {
+                    // Sample the color from the source texture at the original pixel position
+                    vec4 sampledColor = texture(sourceTexture, tangentUV);
+                    outColor = sampledColor;
+                    return outColor;
+                }
+            }
+        }
     }
-}
-
-// Function to apply random pixel enlargement effect
-vec4 applyRandomEnlargement(sampler2D channel, vec2 uv, vec2 resolution, float time, float enlargementFactor, float selectionPercentage) {
-    // Generate random value for this pixel (changes per frame due to time)
-    float randVal = random(uv, time);
     
-    // Check if this pixel should be enlarged
-    if (randVal > (1.0 - selectionPercentage)) {
-        // Make pixel bigger by scaling UV coordinates
-        vec2 center = floor(uv * resolution / enlargementFactor) * enlargementFactor / resolution + (enlargementFactor * 0.5) / resolution;
-        return texture(channel, center);
-    } else {
-        // Normal pixel
-        return texture(channel, uv);
-    }
+    return outColor;
 }
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;
+    vec4 originalColor = texture(iChannel0, uv);
     
-    // Apply enlargement effects
-    fragColor = applyRandomEnlargement(
-        iChannel0, 
-        uv, 
-        iResolution.xy, 
-        iTime, 
-        30.0, 
-        .05
-    );
-
-    fragColor += applyRandomEnlargement(
-        iChannel0, 
-        uv, 
-        iResolution.xy, 
-        iTime, 
-        ENLARGEMENT_FACTOR, 
-        SELECTION_PERCENTAGE
-    ) * .3;
-    
-    // Apply random hue shift effect
-    fragColor = applyRandomHueShift(
-        fragColor, 
-        uv, 
-        iTime, 
-        HUE_SHIFT_PERCENTAGE, 
-        HUE_SHIFT_AMOUNT
+    fragColor = enlargeRandomPixels(
+        fragCoord,
+        iChannel0,
+        iChannel2,                    // Pass the tangent texture
+        iResolution.xy,
+        vec2(16.0, 32.0),            // Pixel size (width, height)
+        0.001,
+        iTime * 60.0,
+        vec4(0.0)                 // Use original image as background
     );
 }
